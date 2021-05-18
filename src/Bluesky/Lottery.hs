@@ -166,22 +166,77 @@ proposalAccepted (Params signatories numReq) pks =
     in numSigned >= numReq
 
 
+{-# INLINEABLE valuePreserved #-}
+valuePreserved :: Value -> ScriptContext -> Bool
+valuePreserved vl ctx =
+    vl == Validation.valueLockedBy (scriptContextTxInfo ctx) (Validation.ownHash ctx)
 
 
+{-# INLINEABLE valuePaid #-}
+valuePaid :: Payment -> TxInfo -> Bool
+valuePaid (Payment vl pk _) = vl == (Validation.valuePaid txinfo pk)
+
+{-# INLINEABLE transition #-}
+transition :: Params -> State LGState -> Input -> Maybe (TxConstraints Void Void, State LGState)
+transition params State { stateDate =s, stateValue=currentValue} i = case (s, i) of
+    (Holding, ProposePayment pmt)
+        | isValidProposal currentValue pmt ->
+            Just ( mempty
+                 , State 
+                     { stateDate = CollectingSignatures pmt []
+                     , stateValue = currentValue
+                     }
+                 )
+    (CollectingSignatures pmt pks, AddSignature pk)
+        | isSignature pk params && not (containsPK pk pks) ->
+            let constraints = Constraints.mustBeSignedBy pk in
+            Just ( constraints
+                 , State 
+                     { stateDate = CollectingSignatures pmt (pk:pks)
+                     , stateValue = currentValue
+                     }
+                 )
+    (CollectingSignatures payment _, Cancel) ->
+        let constraints = Constraints.mustValidateIn (Interval.from (paymentDeadline payment)) in
+        Just ( constraints
+             , State
+                 { stateDate = Holding
+                 , stateValue = currentValue
+                 }
+             )
+    (CollectingSignatures payment pkh, Pay) | proposalAccepted params pkh ->
+        let Payment{paymentAmount, paymentSig, paymentDeadline} = payment 
+            constraints =
+                Constraints.mustValidateIn (Interval.to paymentDeadline)
+                <> Constraints.mustPayToPubKey paymentSig paymentAmount
+        in Just ( constraints
+                , State
+                    { stateDate = Holding
+                    , stateValue = currentValue - paymentAmount
+                    }
+                )
+    _ -> Nothing
+
+-- need to ensure that the payment is always = 1 ada or 1000000 lovelace
 
 
+type LGSigSym = StateMachine LGState Input
+{-# INLINEABLE machine #-}
+machine :: Params -> LGSigSym
+machine params = SM.mkStateNachine Nothing (transition params) isFinal where
+    isFinal _ = False
+
+{-# INLINEABLE mkValidator #-}
+mkValidator :: Params -> Scripts.ValidatorType LGSigSym
+mkValidator params = SM.mkValidator $ machine params
 
 
-
-
-
-
-
-
-
-
-
-
+scriptInstance :: Params -> ScriptInstance LGSigSym
+scriptInstance = Scripts.validatorParams @LGSigSym
+    $$(PlutusTx.COMPILE [|| mkValidator ||])
+    $$(PlutusTx.compile [|| wrap ||])
+    where
+        wrap = Scripts.wrapValidator
 
 
 
