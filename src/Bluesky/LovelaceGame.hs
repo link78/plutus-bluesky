@@ -156,12 +156,15 @@ validPaidback machine txinfo =
     (collectionRange machine `Interval.contains` txInfoValidRange txinfo)
     -- Check that the transaction is signed by the machine owner
     $$ (txinfo `V.txSignedBy` machineOwner machine)
+{-
+How i need the total fund first?
 
+-}
 {-# INLINABLE mkValidator #-}
 mkValidator :: LovelaceMachine -> PubKeyHash -> MachineActions -> ScriptContext -> Bool
 mkValidator m con act ScriptContext{scriptContextTxInfo} = case act of
     -- collect 20% and payback 80%
-    Collect -> validCollection m scriptContextTxInfo
+    Collect -> validCollection m scriptContextTxInfo 
     Pay -> validPaidback m con scriptContextTxInfo
 
 
