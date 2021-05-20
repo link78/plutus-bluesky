@@ -90,13 +90,13 @@ data MachineActions =
 PlutusTx.unstableMakeIsData ''MachineActions
 PlutusTx.makeLift ''MachineActions
 
-
+-- functions that wallet will perform
 type LGSchema =
     BlockchainActions
-        .\/ Endpoint "Collect fund" ()
-        .\/ Endpoint "receive funding" Contribution 
-        .\/ Endpoint "cancel-payment" ()
-        .\/ Endpoint "paid-winner" ()
+        .\/ Endpoint "Collect fund" () -- MachineOwner collect 20%
+        .\/ Endpoint "receive funding" Contribution -- send 1 ada to contribute to the game
+        .\/ Endpoint "cancel-payment" () -- cancel any contribution after the deadline passed
+        .\/ Endpoint "paid-winner" ()  -- payback 80% of total fund to seleceted winner
 
 newtype Contribution = Contribution {
     contriValue      :: Value
