@@ -93,10 +93,10 @@ PlutusTx.makeLift ''MachineActions
 
 type LGSchema =
     BlockchainActions
-        .\/ Endpoint "Collect fund" ()
-        .\/ Endpoint "receive funding" Contribution 
-        .\/ Endpoint "cancel-payment" ()
-        .\/ Endpoint "paid-winner" ()
+        .\/ Endpoint "Collect fund" () -- machineOwer collect 20% of total fund
+        .\/ Endpoint "receive funding" Contribution -- user contribute by paying 1ADA
+        .\/ Endpoint "cancel-payment" () -- cancel payment when the deadline slot passed
+        .\/ Endpoint "paid-winner" ()  -- payback 80% of total fund to winner
 
 newtype Contribution = Contribution {
     contriValue      :: Value
@@ -104,7 +104,7 @@ newtype Contribution = Contribution {
   deriving anyclass (ToJSON, FromJSON, ToSchema, ToArgument)
 
 mkLovelaceMachine :: Slot -> Value -> Slot -> Wallet -> LovelaceMachine
-mkLovelaceMachine dl fund machineWallet =
+mkLovelaceMachine dl fund collectdl machineWallet =
     LovelaceMachine 
         { deadline = dl
         , fundReceived  = fund
@@ -119,7 +119,10 @@ collectionRange :: LovelaceMachine -> SlotRange
 collectionRange lgd =
     Interval.interval (deadline lgd) (collectionDeadline lgd)
 
-
+-- check to see if the pending tx is contained in the LovelaveMachine collection range
+inCollectionRange :: LovelaceMachine -> PendingTx -> Bool
+inCollectionRange machine tx =
+    collectionRange machine `contains` pendingTxValidRange tx
 
 
 data LovelaceFunding
@@ -168,9 +171,25 @@ mkValidator m con act ScriptContext{scriptContextTxInfo} = case act of
     Pay -> validPaidback m con scriptContextTxInfo
 
 
+contributionScript :: LovelaceMachine -> Validator
+contributionScript = Scripts.validatorScript . scriptInstance
 
+-- MachineOwner addr
+machineAddress :: LovelaceMachine -> Ledger.ValidatorHash
+machineAddress = Scripts.validatorHash . contributionScript
 
-
+--Calculate total ada contained in all Inputs
+totalFund :: PendingTx -> Ada
+totalFund tx = foldl f zero (pendingTxInputs tx) where
+    f :: Ada -> PendingTxIn -> Ada
+    f ada i 
+        | fromScript i = ada `plus` fromValue (pendingTxInValue i)
+        | otherwise    = ada
+    fromScript :: PendingTxIn -> Bool
+    fromScript i = case pendingTxInWitness i of
+        Nothing     -> False 
+        Just (h, _) -> h == ownHash tx    
+           
 
 
 
