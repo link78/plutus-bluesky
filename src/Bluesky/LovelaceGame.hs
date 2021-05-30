@@ -36,7 +36,14 @@ import           Data.Aeson               (FromJSON, ToJSON)
 import           Data.Text                (Text)
 import qualified Data.Text                as Text
 import           GHC.Generics             (Generic)
-
+import           Ledger                                     (Address, Slot, Value)
+import           Ledger.AddressMap                          (AddressMap, UtxoMap)
+import qualified Ledger.AddressMap                          as AM
+import           Ledger.Tx                                  (Tx, txOutTxOut, txOutValue)
+import qualified Ledger.Value                               as V
+import           Language.Plutus.Contract.Util              (loopM)
+import           Language.Plutus.Contract.Effects.AwaitSlot (HasAwaitSlot, awaitSlot, currentSlot)
+import           Language.Plutus.Contract.Effects.UtxoAt    (HasUtxoAt, utxoAt)
 import           Ledger                   (PubKeyHash, Slot, Validator, txId)
 import qualified Ledger                   as Ledger
 import qualified Ledger.Ada               as Ada
@@ -94,17 +101,18 @@ PlutusTx.makeLift ''MachineActions
 type LGSchema =
     BlockchainActions
         .\/ Endpoint "Collect fund" () -- MachineOwner collect 20%
-        .\/ Endpoint "receive funding" Contribution -- send 1 ada to contribute to the game
+        .\/ Endpoint "contribute" Contribution -- send 1 ada to contribute to the game
         .\/ Endpoint "cancel-payment" () -- cancel any contribution after the deadline passed
         .\/ Endpoint "paid-winner" ()  -- payback 80% of total fund to seleceted winner
 
+-- value to contribute
 newtype Contribution = Contribution {
     contriValue      :: Value
 } deriving stock (Haskell.Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON, ToSchema, ToArgument)
 
 mkLovelaceMachine :: Slot -> Value -> Slot -> Wallet -> LovelaceMachine
-mkLovelaceMachine dl fund machineWallet =
+mkLovelaceMachine dl fund collectdl machineWallet =
     LovelaceMachine 
         { deadline = dl
         , fundReceived  = fund
@@ -114,12 +122,15 @@ mkLovelaceMachine dl fund machineWallet =
 
 
 -- SlotRange during which the funds can be collected or refund
-
+{-# INLINABLE collectionRange #-}
 collectionRange :: LovelaceMachine -> SlotRange
 collectionRange lgd =
     Interval.interval (deadline lgd) (collectionDeadline lgd)
 
-
+-- check to see if the pending tx is contained in the LovelaveMachine collection range
+inCollectionRange :: LovelaceMachine -> PendingTx -> Bool
+inCollectionRange machine tx =
+    collectionRange machine `contains` pendingTxValidRange tx
 
 
 data LovelaceFunding
@@ -133,6 +144,7 @@ scriptInstance = Scripts.validatorParam @LovelaceFunding
     $$(PlutusTx.compile [|| wrap ||])
     where 
         wrap = Scripts.wrapValidator
+
 
 
 {-# INLINABLE proposalExpired #-}
@@ -149,13 +161,13 @@ validCollection machine txinfo =
     -- Check that the transaction is signed by the machine owner
     $$ (txinfo `V.txSignedBy` machineOwner machine)
 
-{-# INLINABLE validPaidback #-}
-validPaidback :: LovelaceMachine -> TxInfo -> Bool
-validPaidback machine txinfo =
+{-# INLINABLE validPaidWinner #-}
+validPaidWinner :: LovelaceMachine -> pubKeyHash -> TxInfo -> Bool
+validPaidWinner machine player txinfo =
     -- check to see that the Tx falls in the collection range of the game
     (collectionRange machine `Interval.contains` txInfoValidRange txinfo)
     -- Check that the transaction is signed by the machine owner
-    $$ (txinfo `V.txSignedBy` machineOwner machine)
+    $$ (txinfo `V.txSignedBy` player)
 {-
 How i need the total fund first?
 
@@ -165,13 +177,38 @@ mkValidator :: LovelaceMachine -> PubKeyHash -> MachineActions -> ScriptContext 
 mkValidator m con act ScriptContext{scriptContextTxInfo} = case act of
     -- collect 20% and payback 80%
     Collect -> validCollection m scriptContextTxInfo 
-    Pay -> validPaidback m con scriptContextTxInfo
+    Pay -> validPaidWinner m con scriptContextTxInfo
 
 
+contributionScript :: LovelaceMachine -> Validator
+contributionScript = Scripts.validatorScript . scriptInstance
 
+-- MachineOwner addr
+machineAddress :: LovelaceMachine -> Ledger.ValidatorHash
+machineAddress = Scripts.validatorHash . contributionScript
 
+--Calculate total ada contained in all Inputs
+totalFund :: PendingTx -> Ada
+totalFund tx = foldl f zero (pendingTxInputs tx) where
+    f :: Ada -> PendingTxIn -> Ada
+    f ada i 
+        | fromScript i = ada `plus` fromValue (pendingTxInValue i)
+        | otherwise    = ada
+    fromScript :: PendingTxIn -> Bool
+    fromScript i = case pendingTxInWitness i of
+        Nothing     -> False 
+        Just (h, _) -> h == ownHash tx    
 
-
+contribute :: LovelaceMachine -> Contract () LGSchema ContractError ()
+contribute cm = do
+    Contribution{contriValue} <- endpoint @"contribute"
+    logInfo @Text $ "Contributing" <> Text.pack (show contriValue)
+    player <- ownPubKey
+    let inst = scriptInstance cm 
+        tx = Constraints.mustPayToTheScript (pubKeyHash player) contriValue 
+                <> Constraints.mustValidateIn (Ledger.interval 1 (deadline cm))
+    txid <- fmap txId (submitTxConstraints inst tx)
+    utxo <- watchAddressUntil (Scripts.scriptsAddress inst) (collectionDeadline cm)
 
 
 
